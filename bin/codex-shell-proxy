@@ -85,7 +85,7 @@ __codex_shell_run_fast_path() {
 
   [[ -n "${command_text:-}" ]] || return 1
 
-  if [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" ]]; then
+  if [[ "${CODEX_SHELL_SHOW_COMMANDS:-0}" == "1" ]]; then
     print -r -- "$ $command_text"
   fi
   eval "$command_text"
@@ -99,6 +99,26 @@ fi
 
 model="${CODEX_SHELL_MODEL:-gpt-5.3-codex-spark}"
 reasoning="${CODEX_SHELL_REASONING:-low}"
+
+if [[ "${CODEX_SHELL_WARM:-1}" != "0" && "${CODEX_SHELL_SEARCH:-0}" != "1" ]] && command -v codex-shell-daemon >/dev/null 2>&1; then
+  daemon_args=(
+    request
+    --cwd "$PWD"
+    --model "$model"
+    --effort "$reasoning"
+  )
+
+  [[ "${CODEX_SHELL_YOLO:-0}" == "1" ]] && daemon_args+=(--yolo)
+  [[ "${CODEX_SHELL_SHOW_COMMANDS:-0}" == "1" ]] && daemon_args+=(--show-commands)
+
+  codex-shell-daemon "${daemon_args[@]}" -- "$input"
+  daemon_exit=$?
+  if [[ "$daemon_exit" != "69" || "${CODEX_SHELL_WARM_FALLBACK:-1}" == "0" ]]; then
+    exit "$daemon_exit"
+  fi
+  print -u2 -- "[codex-shell] warm daemon unavailable; falling back to codex exec."
+fi
+
 lockdir="${CODEX_SHELL_LOCKDIR:-$HOME/.cache/codex-shell-proxy.lock}"
 prompt_file=''
 json_file=''
@@ -209,7 +229,7 @@ if command -v jq >/dev/null 2>&1; then
             output_text=$(jq -r '.item.aggregated_output // empty' 2>/dev/null <<< "$line")
             exit_code=$(jq -r '.item.exit_code // empty' 2>/dev/null <<< "$line")
 
-            if [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" && -n "$command_text" ]]; then
+            if [[ "${CODEX_SHELL_SHOW_COMMANDS:-0}" == "1" && -n "$command_text" ]]; then
               print -r -- "$ $command_text"
             fi
             [[ -n "$output_text" ]] && print -rn -- "$output_text"

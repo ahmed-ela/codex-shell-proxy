@@ -2,6 +2,10 @@
 # normally; otherwise the line is sent to Codex as a terminal request.
 
 if [[ -o interactive ]]; then
+  if [[ "${CODEX_SHELL_WARM:-1}" != "0" && "${CODEX_SHELL_AUTOSTART:-1}" != "0" ]] && command -v codex-shell-daemon >/dev/null 2>&1; then
+    codex-shell-daemon start --quiet >/dev/null 2>&1 &!
+  fi
+
   __codex_shell_line_is_direct_command() {
     emulate -L zsh
     setopt local_options extended_glob

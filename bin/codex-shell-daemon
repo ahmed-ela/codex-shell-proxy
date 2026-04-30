@@ -1,0 +1,725 @@
+#!/usr/bin/env python3
+"""Warm Codex app-server daemon for codex-shell-proxy."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import queue
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+VERSION = "0.1.0"
+EXIT_UNAVAILABLE = 69
+EXIT_BUSY = 75
+
+STATE_DIR = Path(
+    os.environ.get(
+        "CODEX_SHELL_STATE_DIR",
+        str(Path.home() / ".cache" / "codex-shell-proxy"),
+    )
+).expanduser()
+SOCKET_PATH = Path(os.environ.get("CODEX_SHELL_SOCKET", str(STATE_DIR / "daemon.sock")))
+PID_PATH = STATE_DIR / "daemon.pid"
+LOG_PATH = STATE_DIR / "daemon.log"
+START_LOCK_PATH = STATE_DIR / "start.lock"
+
+TERMINAL_INSTRUCTIONS = """\
+You are running as Ahmed's fast terminal assistant inside macOS zsh.
+
+The user typed a line that was not recognized as a direct shell command.
+Interpret it as natural language and handle it now.
+
+Behavior:
+- Be fast and concise.
+- Only do what the user asked.
+- Do not inspect or print repo status unless it helps satisfy the user request.
+- Run straightforward shell/repo commands directly when useful.
+- Prefer jj/Jujutsu over git when the current directory is in a jj repo.
+- Avoid destructive actions unless the user explicitly asked for them.
+- If an action is ambiguous or risky, ask one short question instead of guessing.
+- For code review requests, use a code-review stance: findings first, ordered by severity.
+- Do not narrate before straightforward command execution; run the command first.
+- If you run a command that answers the request, do not add a final explanation.
+- Only produce a final text answer when you did not run a command or the user explicitly asked for explanation.
+- Keep final responses short.
+- Do not explain this routing layer unless the user asks.
+"""
+
+
+def now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def ensure_state_dir() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def log(message: str) -> None:
+    ensure_state_dir()
+    with LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(f"{now()} {message}\n")
+
+
+def dumps(obj: dict[str, Any]) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def repo_kind(cwd: str) -> str:
+    try:
+        subprocess.run(
+            ["jj", "root", "--ignore-working-copy"],
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.5,
+            check=True,
+        )
+        return "jj"
+    except Exception:
+        pass
+
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.5,
+            check=True,
+        )
+        return "git"
+    except Exception:
+        return "none"
+
+
+def terminal_prompt(user_input: str, cwd: str, model: str) -> str:
+    return f"""\
+Environment:
+- cwd: {cwd}
+- shell: zsh
+- repo_kind: {repo_kind(cwd)}
+- model requested by wrapper: {model}
+
+User input:
+{user_input}
+"""
+
+
+class AppServer:
+    def __init__(self) -> None:
+        self.proc: subprocess.Popen[str] | None = None
+        self.messages: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.pending: list[dict[str, Any]] = []
+        self.stdin_lock = threading.Lock()
+        self.threads: dict[tuple[str, str, str, bool], str] = {}
+        self.token_usage: dict[str, dict[str, Any]] = {}
+
+    def ensure_started(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            return
+
+        self.stop_process()
+        self.pending.clear()
+        self.threads.clear()
+        while not self.messages.empty():
+            try:
+                self.messages.get_nowait()
+            except queue.Empty:
+                break
+
+        log("starting codex app-server")
+        self.proc = subprocess.Popen(
+            ["codex", "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=str(Path.home()),
+        )
+
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        threading.Thread(target=self._read_stderr, daemon=True).start()
+
+        self.request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "codex-shell-proxy",
+                    "title": "Codex Shell Proxy",
+                    "version": VERSION,
+                },
+                "capabilities": {
+                    "experimentalApi": True,
+                    "optOutNotificationMethods": [
+                        "account/rateLimits/updated",
+                        "thread/status/changed",
+                    ],
+                },
+            },
+            timeout=25,
+        )
+        self.notify("initialized")
+        log("codex app-server initialized")
+
+    def stop_process(self) -> None:
+        proc = self.proc
+        self.proc = None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def _read_stdout(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stdout is None:
+            return
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.messages.put(json.loads(line))
+            except Exception:
+                log(f"app-server stdout non-json: {line[:1000]}")
+        self.messages.put({"__eof__": True})
+
+    def _read_stderr(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stderr is None:
+            return
+        for line in proc.stderr:
+            line = line.rstrip("\n")
+            if line:
+                log(f"app-server stderr: {line}")
+
+    def send(self, obj: dict[str, Any]) -> None:
+        self.ensure_started()
+        assert self.proc is not None
+        assert self.proc.stdin is not None
+        payload = dumps(obj) + "\n"
+        with self.stdin_lock:
+            self.proc.stdin.write(payload)
+            self.proc.stdin.flush()
+
+    def request(self, method: str, params: dict[str, Any] | None = None, timeout: float = 60) -> Any:
+        request_id = str(uuid.uuid4())
+        msg: dict[str, Any] = {"method": method, "id": request_id}
+        if params is not None:
+            msg["params"] = params
+        self.send(msg)
+        return self.wait_response(request_id, method, timeout)
+
+    def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        msg: dict[str, Any] = {"method": method}
+        if params is not None:
+            msg["params"] = params
+        self.send(msg)
+
+    def next_message(self, timeout: float) -> dict[str, Any]:
+        if self.pending:
+            return self.pending.pop(0)
+        try:
+            msg = self.messages.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError("timed out waiting for codex app-server") from exc
+        if msg.get("__eof__"):
+            raise RuntimeError("codex app-server exited")
+        return msg
+
+    def wait_response(self, request_id: str, method: str, timeout: float = 60) -> Any:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"timed out waiting for {method}")
+            msg = self.next_message(remaining)
+            if "id" in msg and "method" in msg:
+                self.handle_server_request(msg)
+                continue
+            if msg.get("id") == request_id and "result" in msg:
+                return msg["result"]
+            if msg.get("id") == request_id and "error" in msg:
+                error = msg.get("error") or {}
+                raise RuntimeError(error.get("message") or f"{method} failed")
+            # Notifications can legally arrive while a request is in flight.
+            # They are not needed until the turn stream starts, and re-queueing
+            # them here can starve the response we are waiting for.
+
+    def handle_server_request(self, msg: dict[str, Any]) -> None:
+        request_id = msg.get("id")
+        method = msg.get("method")
+        if request_id is None:
+            return
+
+        if method == "item/commandExecution/requestApproval":
+            self.send({"id": request_id, "result": {"decision": "accept"}})
+        elif method == "item/fileChange/requestApproval":
+            self.send({"id": request_id, "result": {"decision": "accept"}})
+        elif method == "item/tool/requestUserInput":
+            self.send({"id": request_id, "result": {"answers": {}}})
+        elif method == "mcpServer/elicitation/request":
+            self.send(
+                {
+                    "id": request_id,
+                    "result": {"action": "cancel", "content": None, "_meta": None},
+                }
+            )
+        else:
+            self.send(
+                {
+                    "id": request_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"codex-shell-daemon cannot handle {method}",
+                    },
+                }
+            )
+
+    def thread_for(self, cwd: str, model: str, effort: str, yolo: bool) -> str:
+        self.ensure_started()
+        key = (cwd, model, effort, yolo)
+        existing = self.threads.get(key)
+        if existing:
+            return existing
+
+        response = self.request(
+            "thread/start",
+            {
+                "model": model,
+                "cwd": cwd,
+                "approvalPolicy": "never",
+                "developerInstructions": TERMINAL_INSTRUCTIONS,
+                "ephemeral": True,
+            },
+            timeout=45,
+        )
+        thread_id = response["thread"]["id"]
+        self.threads[key] = thread_id
+        return thread_id
+
+    @staticmethod
+    def sandbox_policy(cwd: str, yolo: bool) -> dict[str, Any]:
+        if yolo:
+            return {"type": "dangerFullAccess"}
+        return {
+            "type": "workspaceWrite",
+            "writableRoots": [cwd],
+            "networkAccess": False,
+            "excludeTmpdirEnvVar": False,
+            "excludeSlashTmp": False,
+        }
+
+    def run_turn(
+        self,
+        *,
+        user_input: str,
+        cwd: str,
+        model: str,
+        effort: str,
+        yolo: bool,
+        show_commands: bool,
+        emit: Any,
+    ) -> int:
+        self.ensure_started()
+        thread_id = self.thread_for(cwd, model, effort, yolo)
+        response = self.request(
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": [
+                    {
+                        "type": "text",
+                        "text": terminal_prompt(user_input, cwd, model),
+                        "text_elements": [],
+                    }
+                ],
+                "cwd": cwd,
+                "approvalPolicy": "never",
+                "sandboxPolicy": self.sandbox_policy(cwd, yolo),
+                "model": model,
+                "effort": effort,
+            },
+            timeout=45,
+        )
+        turn_id = response["turn"]["id"]
+
+        emit("stderr", f"{model} is thinking....\n")
+
+        agent_text: list[str] = []
+        had_command = False
+        streamed_command_output: set[str] = set()
+        exit_code = 0
+
+        while True:
+            msg = self.next_message(timeout=600)
+
+            if "id" in msg and "method" in msg:
+                self.handle_server_request(msg)
+                continue
+
+            method = msg.get("method")
+            params = msg.get("params") or {}
+            if params.get("turnId") not in (None, turn_id):
+                continue
+
+            if method == "item/started":
+                item = params.get("item") or {}
+                if item.get("type") == "commandExecution":
+                    had_command = True
+                    command = item.get("command")
+                    if show_commands and command:
+                        emit("stdout", f"$ {command}\n")
+                continue
+
+            if method == "item/commandExecution/outputDelta":
+                had_command = True
+                item_id = params.get("itemId")
+                if item_id:
+                    streamed_command_output.add(item_id)
+                emit("stdout", params.get("delta") or "")
+                continue
+
+            if method == "item/agentMessage/delta":
+                agent_text.append(params.get("delta") or "")
+                continue
+
+            if method == "item/completed":
+                item = params.get("item") or {}
+                item_type = item.get("type")
+                if item_type == "commandExecution":
+                    had_command = True
+                    item_id = item.get("id")
+                    if item_id not in streamed_command_output:
+                        output = item.get("aggregatedOutput")
+                        if output:
+                            emit("stdout", output)
+                    code = item.get("exitCode")
+                    if isinstance(code, int) and code != 0:
+                        exit_code = code
+                        emit("stderr", f"[codex-shell] command exited with {code}\n")
+                elif item_type == "agentMessage" and not agent_text:
+                    text = item.get("text")
+                    if text:
+                        agent_text.append(text)
+                continue
+
+            if method == "thread/tokenUsage/updated":
+                usage = params.get("tokenUsage")
+                if usage:
+                    self.token_usage[thread_id] = usage
+                continue
+
+            if method == "turn/completed":
+                turn = params.get("turn") or {}
+                if turn.get("id") != turn_id:
+                    continue
+                status = turn.get("status")
+                if status != "completed":
+                    error = (turn.get("error") or {}).get("message")
+                    if error:
+                        emit("stderr", f"[codex-shell] {error}\n")
+                    return exit_code or 1
+                if not had_command:
+                    final_text = "".join(agent_text).strip()
+                    if final_text:
+                        emit("stdout", final_text + "\n")
+                return exit_code
+
+
+class Daemon:
+    def __init__(self) -> None:
+        self.app = AppServer()
+        self.busy_lock = threading.Lock()
+        self.shutdown = threading.Event()
+
+    def serve(self) -> int:
+        ensure_state_dir()
+        if SOCKET_PATH.exists():
+            try:
+                SOCKET_PATH.unlink()
+            except FileNotFoundError:
+                pass
+
+        signal.signal(signal.SIGTERM, self._stop_signal)
+        signal.signal(signal.SIGINT, self._stop_signal)
+
+        with PID_PATH.open("w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()}\n")
+
+        self.app.ensure_started()
+
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(SOCKET_PATH))
+        server.listen(16)
+        log(f"daemon listening on {SOCKET_PATH}")
+
+        try:
+            while not self.shutdown.is_set():
+                try:
+                    server.settimeout(0.5)
+                    client, _ = server.accept()
+                except socket.timeout:
+                    continue
+                threading.Thread(target=self.handle_client, args=(client,), daemon=True).start()
+        finally:
+            server.close()
+            self.app.stop_process()
+            try:
+                SOCKET_PATH.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                PID_PATH.unlink()
+            except FileNotFoundError:
+                pass
+            log("daemon stopped")
+        return 0
+
+    def _stop_signal(self, _signum: int, _frame: Any) -> None:
+        self.shutdown.set()
+
+    def handle_client(self, client: socket.socket) -> None:
+        with client:
+            file_obj = client.makefile("rwb", buffering=0)
+            try:
+                raw = file_obj.readline()
+                if not raw:
+                    return
+                request = json.loads(raw.decode("utf-8"))
+                command = request.get("command")
+
+                if command == "status":
+                    self.send_client(file_obj, {"status": "ok", "pid": os.getpid()})
+                    return
+
+                if command == "stop":
+                    self.send_client(file_obj, {"status": "stopping", "pid": os.getpid()})
+                    self.shutdown.set()
+                    return
+
+                if command != "turn":
+                    self.send_client(file_obj, {"error": "unknown command", "exit": 2})
+                    return
+
+                if not self.busy_lock.acquire(blocking=False):
+                    self.send_client(
+                        file_obj,
+                        {
+                            "stream": "stderr",
+                            "text": "[codex-shell] Codex is busy; try again in a few seconds.\n",
+                        },
+                    )
+                    self.send_client(file_obj, {"done": True, "exit": EXIT_BUSY})
+                    return
+
+                try:
+                    exit_code = self.app.run_turn(
+                        user_input=str(request["input"]),
+                        cwd=str(request["cwd"]),
+                        model=str(request["model"]),
+                        effort=str(request["effort"]),
+                        yolo=bool(request.get("yolo")),
+                        show_commands=bool(request.get("showCommands", False)),
+                        emit=lambda stream, text: self.send_client(
+                            file_obj, {"stream": stream, "text": text}
+                        ),
+                    )
+                    self.send_client(file_obj, {"done": True, "exit": exit_code})
+                finally:
+                    self.busy_lock.release()
+            except Exception as exc:
+                log(f"client error: {exc!r}")
+                try:
+                    self.send_client(file_obj, {"error": str(exc), "exit": EXIT_UNAVAILABLE})
+                except Exception:
+                    pass
+
+    @staticmethod
+    def send_client(file_obj: Any, obj: dict[str, Any]) -> None:
+        file_obj.write((dumps(obj) + "\n").encode("utf-8"))
+
+
+def connect_once(timeout: float = 0.5) -> socket.socket:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect(str(SOCKET_PATH))
+    return sock
+
+
+def request_daemon(payload: dict[str, Any], timeout: float = 0.5) -> tuple[int, list[dict[str, Any]]]:
+    try:
+        sock = connect_once(timeout)
+    except OSError:
+        return EXIT_UNAVAILABLE, []
+    sock.settimeout(None)
+    messages: list[dict[str, Any]] = []
+    with sock:
+        file_obj = sock.makefile("rwb", buffering=0)
+        file_obj.write((dumps(payload) + "\n").encode("utf-8"))
+        while True:
+            line = file_obj.readline()
+            if not line:
+                break
+            messages.append(json.loads(line.decode("utf-8")))
+            if messages[-1].get("done") or messages[-1].get("status") or messages[-1].get("error"):
+                break
+    exit_code = int(messages[-1].get("exit", 0)) if messages else EXIT_UNAVAILABLE
+    return exit_code, messages
+
+
+def daemon_is_running() -> bool:
+    code, messages = request_daemon({"command": "status"})
+    return code == 0 and bool(messages) and messages[-1].get("status") == "ok"
+
+
+def start_daemon(quiet: bool = False) -> int:
+    ensure_state_dir()
+    with START_LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if daemon_is_running():
+            return 0
+        if SOCKET_PATH.exists():
+            try:
+                SOCKET_PATH.unlink()
+            except FileNotFoundError:
+                pass
+
+        log_file = LOG_PATH.open("a", encoding="utf-8")
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            close_fds=True,
+            start_new_session=True,
+        )
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if daemon_is_running():
+                if not quiet:
+                    print("codex-shell-daemon started")
+                return 0
+            time.sleep(0.1)
+
+    if not quiet:
+        print("codex-shell-daemon failed to start", file=sys.stderr)
+    return EXIT_UNAVAILABLE
+
+
+def stop_daemon() -> int:
+    code, messages = request_daemon({"command": "stop"})
+    if code == EXIT_UNAVAILABLE:
+        print("codex-shell-daemon is not running")
+        return 0
+    for msg in messages:
+        if msg.get("status"):
+            print(f"codex-shell-daemon {msg['status']} pid={msg.get('pid')}")
+    return 0
+
+
+def status_daemon() -> int:
+    code, messages = request_daemon({"command": "status"})
+    if code == EXIT_UNAVAILABLE:
+        print("stopped")
+        return 1
+    for msg in messages:
+        if msg.get("status"):
+            print(f"{msg['status']} pid={msg.get('pid')}")
+            return 0
+    print("unknown")
+    return 1
+
+
+def request_turn(args: argparse.Namespace) -> int:
+    if not daemon_is_running():
+        started = start_daemon(quiet=True)
+        if started != 0:
+            print("[codex-shell] warm daemon unavailable.", file=sys.stderr)
+            return EXIT_UNAVAILABLE
+
+    payload = {
+        "command": "turn",
+        "input": args.input,
+        "cwd": str(Path(args.cwd).expanduser().resolve()),
+        "model": args.model,
+        "effort": args.effort,
+        "yolo": args.yolo,
+        "showCommands": args.show_commands,
+    }
+    code, messages = request_daemon(payload, timeout=1)
+    if code == EXIT_UNAVAILABLE:
+        print("[codex-shell] warm daemon unavailable.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    for msg in messages:
+        if "stream" in msg:
+            stream = sys.stderr if msg["stream"] == "stderr" else sys.stdout
+            stream.write(str(msg.get("text") or ""))
+            stream.flush()
+        elif "error" in msg:
+            print(f"[codex-shell] {msg['error']}", file=sys.stderr)
+            return int(msg.get("exit", EXIT_UNAVAILABLE))
+    return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="codex-shell-daemon")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    start_p = sub.add_parser("start")
+    start_p.add_argument("--quiet", action="store_true")
+
+    sub.add_parser("serve")
+    sub.add_parser("stop")
+    sub.add_parser("status")
+
+    request_p = sub.add_parser("request")
+    request_p.add_argument("--cwd", default=os.getcwd())
+    request_p.add_argument("--model", default=os.environ.get("CODEX_SHELL_MODEL", "gpt-5.3-codex-spark"))
+    request_p.add_argument("--effort", default=os.environ.get("CODEX_SHELL_REASONING", "low"))
+    request_p.add_argument("--yolo", action="store_true")
+    request_p.add_argument("--show-commands", dest="show_commands", action="store_true")
+    request_p.add_argument("--hide-commands", dest="show_commands", action="store_false")
+    request_p.set_defaults(show_commands=False)
+    request_p.add_argument("input", nargs=argparse.REMAINDER)
+
+    args = parser.parse_args(argv)
+
+    if args.cmd == "serve":
+        return Daemon().serve()
+    if args.cmd == "start":
+        return start_daemon(quiet=args.quiet)
+    if args.cmd == "stop":
+        return stop_daemon()
+    if args.cmd == "status":
+        return status_daemon()
+    if args.cmd == "request":
+        if args.input and args.input[0] == "--":
+            args.input = args.input[1:]
+        args.input = " ".join(args.input).strip()
+        if not args.input:
+            print("usage: codex-shell-daemon request -- <natural language request>", file=sys.stderr)
+            return 2
+        return request_turn(args)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
