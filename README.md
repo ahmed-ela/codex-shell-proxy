@@ -30,7 +30,11 @@ Natural-language request:
 can you ls
 ```
 
-The natural-language line stays visible, then the shell prints:
+Obvious shell requests are handled by a local deterministic fast path. For
+example, `can you ls` maps directly to `ls` without starting Codex.
+
+For requests that need Codex, the natural-language line stays visible, then the
+shell prints:
 
 ```text
 gpt-5.3-codex-spark is thinking....
@@ -56,6 +60,12 @@ export CODEX_SHELL_SHOW_COMMANDS=0
 ```
 
 Hide the `$ /bin/zsh -lc ...` command line and show only command output.
+
+```sh
+export CODEX_SHELL_FAST_PATH=0
+```
+
+Disable local fast paths and send every natural-language request to Codex.
 
 ```sh
 export CODEX_SHELL_YOLO=1

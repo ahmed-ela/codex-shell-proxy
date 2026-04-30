@@ -13,6 +13,90 @@ if [[ -z "${input//[[:space:]]/}" ]]; then
   exit 2
 fi
 
+__codex_shell_normalize() {
+  emulate -L zsh
+  local text="${1:l}"
+  text="${text//[?!.]/}"
+  text="${text//_/ }"
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  print -r -- ${(j: :)${(z)text}}
+}
+
+__codex_shell_run_fast_path() {
+  emulate -L zsh
+  setopt local_options pipefail
+
+  local raw="$1"
+  local normalized command_text target
+  normalized="$(__codex_shell_normalize "$raw")"
+
+  case "$normalized" in
+    "can you ls"|"can you list"|"can you list files"|"list files"|"show files"|"run ls")
+      command_text='ls'
+      ;;
+    "can you ls -1"|"can you list one per line"|"list files one per line")
+      command_text='ls -1'
+      ;;
+    "can you pwd"|"run pwd"|"pwd"|"where am i"|"what folder am i in"|"what directory am i in")
+      command_text='pwd'
+      ;;
+    "show jj status"|"jj status"|"show my jj status")
+      command -v jj >/dev/null 2>&1 || return 1
+      command_text='jj status'
+      ;;
+    "show my jj changes"|"show jj changes"|"show changes")
+      command -v jj >/dev/null 2>&1 || return 1
+      jj root --ignore-working-copy >/dev/null 2>&1 || return 1
+      command_text='jj diff'
+      ;;
+    "show git status"|"git status"|"show my git status")
+      command -v git >/dev/null 2>&1 || return 1
+      command_text='git status --short --branch'
+      ;;
+  esac
+
+  if [[ -z "${command_text:-}" ]]; then
+    if [[ "$normalized" == (can\ you\ see\ what\ is\ in|what\ is\ in|show\ what\ is\ in|list\ what\ is\ in)\ * ]]; then
+      target="${normalized##* in }"
+      case "$target" in
+        repos)
+          [[ -d "$HOME/repos" ]] || return 1
+          command_text="ls -1 ${(q)HOME}/repos"
+          ;;
+        downloads)
+          [[ -d "$HOME/Downloads" ]] || return 1
+          command_text="ls -1 ${(q)HOME}/Downloads"
+          ;;
+        desktop)
+          [[ -d "$HOME/Desktop" ]] || return 1
+          command_text="ls -1 ${(q)HOME}/Desktop"
+          ;;
+        documents)
+          [[ -d "$HOME/Documents" ]] || return 1
+          command_text="ls -1 ${(q)HOME}/Documents"
+          ;;
+        here|this\ folder|this\ directory)
+          command_text='ls -1'
+          ;;
+      esac
+    fi
+  fi
+
+  [[ -n "${command_text:-}" ]] || return 1
+
+  if [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" ]]; then
+    print -r -- "$ $command_text"
+  fi
+  eval "$command_text"
+  __codex_shell_fast_path_exit=$?
+  return 0
+}
+
+if [[ "${CODEX_SHELL_FAST_PATH:-1}" != "0" ]] && __codex_shell_run_fast_path "$input"; then
+  exit "${__codex_shell_fast_path_exit:-0}"
+fi
+
 model="${CODEX_SHELL_MODEL:-gpt-5.3-codex-spark}"
 reasoning="${CODEX_SHELL_REASONING:-low}"
 lockdir="${CODEX_SHELL_LOCKDIR:-$HOME/.cache/codex-shell-proxy.lock}"
