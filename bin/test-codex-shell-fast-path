@@ -1,0 +1,73 @@
+#!/usr/bin/env zsh
+
+emulate -L zsh
+setopt local_options pipefail
+
+script_dir="${0:A:h}"
+proxy="$script_dir/codex-shell-proxy"
+
+if [[ ! -x "$proxy" ]]; then
+  print -u2 -- "test-codex-shell-fast-path: proxy not found at $proxy"
+  exit 2
+fi
+
+expected_chrome_status() {
+  emulate -L zsh
+  if command ps -axo comm= 2>/dev/null | command grep -F -- 'Google Chrome.app/Contents/MacOS/Google Chrome' >/dev/null 2>&1; then
+    print -r -- 'running'
+  else
+    print -r -- 'not_running'
+  fi
+}
+
+run_proxy() {
+  CODEX_SHELL_TEST_FAST_PATH_ONLY=1 \
+  CODEX_SHELL_SHOW_COMMANDS=0 \
+  CODEX_SHELL_WARM=0 \
+  "$proxy" -- "$1"
+}
+
+integer passed=0 failed=0 i=1
+
+check_output() {
+  local label="$1" input="$2" expected="$3" output rc
+  output="$(run_proxy "$input" 2>&1)"
+  rc=$?
+
+  if [[ "$rc" == 0 && "$output" == "$expected" ]]; then
+    (( passed++ ))
+    printf 'ok %02d %-34s %s\n' "$i" "$label" fast
+  else
+    (( failed++ ))
+    printf 'not ok %02d %-34s rc=%s expected=%s output=%s\n' \
+      "$i" "$label" "$rc" "${(qqq)expected}" "${(qqq)output}"
+  fi
+  (( i++ ))
+}
+
+check_no_fast_path() {
+  local label="$1" input="$2" output rc
+  output="$(run_proxy "$input" 2>&1)"
+  rc=$?
+
+  if [[ "$rc" == 64 && -z "$output" ]]; then
+    (( passed++ ))
+    printf 'ok %02d %-34s %s\n' "$i" "$label" no-fast-path
+  else
+    (( failed++ ))
+    printf 'not ok %02d %-34s rc=%s output=%s\n' \
+      "$i" "$label" "$rc" "${(qqq)output}"
+  fi
+  (( i++ ))
+}
+
+chrome_status="$(expected_chrome_status)"
+
+check_output "chrome process question" "chrome process running?" "$chrome_status"
+check_output "is chrome running" "is chrome running" "$chrome_status"
+check_output "google chrome open" "is google chrome open" "$chrome_status"
+check_no_fast_path "chrome alone" "chrome"
+check_no_fast_path "unknown app process" "figma process running?"
+
+printf '\n%s passed, %s failed\n' "$passed" "$failed"
+(( failed == 0 ))

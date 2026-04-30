@@ -23,6 +23,54 @@ __codex_shell_normalize() {
   print -r -- ${(j: :)${(z)text}}
 }
 
+__codex_shell_print_app_process_status() {
+  emulate -L zsh
+  setopt local_options pipefail
+
+  local app_key="$1"
+  local process_pattern=''
+
+  case "$app_key" in
+    chrome|google\ chrome)
+      process_pattern='Google Chrome.app/Contents/MacOS/Google Chrome'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if command ps -axo comm= 2>/dev/null | command grep -F -- "$process_pattern" >/dev/null 2>&1; then
+    print -r -- 'running'
+  else
+    print -r -- 'not_running'
+  fi
+
+  __codex_shell_fast_path_exit=0
+  return 0
+}
+
+__codex_shell_run_process_status_fast_path() {
+  emulate -L zsh
+  setopt local_options extended_glob
+
+  local normalized="$1"
+
+  case "$normalized" in
+    chrome|google\ chrome)
+      return 1
+      ;;
+    chrome\ process\ running|chrome\ running|chrome\ open|\
+    is\ chrome\ process\ running|is\ the\ chrome\ process\ running|is\ chrome\ running|is\ chrome\ open|\
+    google\ chrome\ process\ running|google\ chrome\ running|google\ chrome\ open|\
+    is\ google\ chrome\ process\ running|is\ the\ google\ chrome\ process\ running|is\ google\ chrome\ running|is\ google\ chrome\ open)
+      __codex_shell_print_app_process_status chrome
+      return $?
+      ;;
+  esac
+
+  return 1
+}
+
 __codex_shell_run_fast_path() {
   emulate -L zsh
   setopt local_options pipefail
@@ -30,6 +78,10 @@ __codex_shell_run_fast_path() {
   local raw="$1"
   local normalized command_text target
   normalized="$(__codex_shell_normalize "$raw")"
+
+  if __codex_shell_run_process_status_fast_path "$normalized"; then
+    return 0
+  fi
 
   case "$normalized" in
     "can you ls"|"can you list"|"can you list files"|"list files"|"show files"|"run ls")
@@ -95,6 +147,10 @@ __codex_shell_run_fast_path() {
 
 if [[ "${CODEX_SHELL_FAST_PATH:-1}" != "0" ]] && __codex_shell_run_fast_path "$input"; then
   exit "${__codex_shell_fast_path_exit:-0}"
+fi
+
+if [[ "${CODEX_SHELL_TEST_FAST_PATH_ONLY:-0}" == "1" ]]; then
+  exit 64
 fi
 
 model="${CODEX_SHELL_MODEL:-gpt-5.3-codex-spark}"

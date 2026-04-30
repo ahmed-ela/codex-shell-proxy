@@ -32,6 +32,8 @@ can you ls
 
 Obvious shell requests are handled by a local deterministic fast path. For
 example, `can you ls` maps directly to `ls` without starting Codex.
+Exact OS predicates also stay local. For example, `chrome process running?`
+prints only `running` or `not_running`.
 
 For requests that need Codex, the proxy uses a warm daemon by default. The
 natural-language line stays visible, then the shell prints:
@@ -116,6 +118,9 @@ is still remote and usually dominates real Codex requests.
 
 ```sh
 bin/test-codex-shell-router
+bin/test-codex-shell-fast-path
 ```
 
 The router test runs the deterministic command-vs-natural-language classifier inside an interactive zsh login shell. It does not invoke Codex and does not execute candidate commands.
+The fast-path test exercises local deterministic handlers only and exits before
+any Codex fallback can run.

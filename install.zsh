@@ -12,6 +12,7 @@ mkdir -p -- "$bin_dir" "$zsh_dir"
 
 ln -sf -- "$repo_dir/bin/codex-shell-proxy" "$bin_dir/codex-shell-proxy"
 ln -sf -- "$repo_dir/bin/codex-shell-daemon" "$bin_dir/codex-shell-daemon"
+ln -sf -- "$repo_dir/bin/test-codex-shell-fast-path" "$bin_dir/test-codex-shell-fast-path"
 ln -sf -- "$repo_dir/bin/test-codex-shell-router" "$bin_dir/test-codex-shell-router"
 ln -sf -- "$repo_dir/zsh/codex-shell.zsh" "$zsh_dir/codex-shell.zsh"
 
