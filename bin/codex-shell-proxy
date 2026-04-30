@@ -1,0 +1,149 @@
+#!/usr/bin/env zsh
+
+emulate -L zsh
+setopt local_options pipefail
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+input="$*"
+if [[ -z "${input//[[:space:]]/}" ]]; then
+  print -u2 -- "usage: codex-shell-proxy -- <natural language request>"
+  exit 2
+fi
+
+model="${CODEX_SHELL_MODEL:-gpt-5.3-codex-spark}"
+reasoning="${CODEX_SHELL_REASONING:-low}"
+lockdir="${CODEX_SHELL_LOCKDIR:-$HOME/.cache/codex-shell-proxy.lock}"
+prompt_file=''
+json_file=''
+last_message_file=''
+had_command=0
+
+mkdir -p -- "${lockdir:h}" 2>/dev/null || true
+if ! mkdir -- "$lockdir" 2>/dev/null; then
+  print -u2 -- "[codex-shell] Codex is busy; try again in a few seconds."
+  exit 75
+fi
+
+cleanup() {
+  [[ -n "$prompt_file" && -f "$prompt_file" ]] && rm -f -- "$prompt_file"
+  [[ -n "$json_file" && -f "$json_file" ]] && rm -f -- "$json_file"
+  [[ -n "$last_message_file" && -f "$last_message_file" ]] && rm -f -- "$last_message_file"
+  rmdir -- "$lockdir" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM HUP
+
+repo_kind='none'
+
+if command -v jj >/dev/null 2>&1; then
+  jj_root=$(command jj root --ignore-working-copy 2>/dev/null)
+  if [[ -n "${jj_root:-}" ]]; then
+    repo_kind='jj'
+  fi
+fi
+
+if [[ "$repo_kind" != "jj" ]] && command git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  repo_kind='git'
+fi
+
+prompt_file=$(mktemp "${TMPDIR:-/tmp}/codex-shell-prompt.XXXXXX") || exit 1
+cat >| "$prompt_file" <<EOF
+You are running as Ahmed's fast terminal assistant inside macOS zsh.
+
+The user typed a line that was not recognized as a direct shell command. Interpret it as natural language and handle it now.
+
+Behavior:
+- Be fast and concise.
+- Only do what the user asked.
+- Do not inspect or print repo status unless it helps satisfy the user request.
+- Run straightforward shell/repo commands directly when useful.
+- Prefer jj/Jujutsu over git when the current directory is in a jj repo.
+- Avoid destructive actions unless the user explicitly asked for them.
+- If an action is ambiguous or risky, ask one short question instead of guessing.
+- For code review requests, use a code-review stance: findings first, ordered by severity.
+- Do not narrate before straightforward command execution; run the command first.
+- If you run a command that answers the request, do not add a final explanation.
+- Only produce a final text answer when you did not run a command or the user explicitly asked for explanation.
+- Keep final responses short.
+- Do not explain this routing layer unless the user asks.
+
+Environment:
+- cwd: $PWD
+- shell: zsh
+- repo_kind: $repo_kind
+- model requested by wrapper: $model
+
+User input:
+$input
+EOF
+
+codex_args=()
+if [[ "${CODEX_SHELL_SEARCH:-0}" == "1" ]]; then
+  codex_args+=(--search)
+fi
+
+codex_args+=(
+  exec
+  --skip-git-repo-check
+  -C "$PWD"
+  -m "$model"
+  -c "model_reasoning_effort=\"$reasoning\""
+)
+
+if [[ "${CODEX_SHELL_YOLO:-0}" == "1" ]]; then
+  codex_args+=(--dangerously-bypass-approvals-and-sandbox)
+else
+  codex_args+=(--full-auto)
+fi
+
+print -u2 -- "$model is thinking...."
+if command -v jq >/dev/null 2>&1; then
+  json_file=$(mktemp "${TMPDIR:-/tmp}/codex-shell-json.XXXXXX") || exit 1
+  last_message_file=$(mktemp "${TMPDIR:-/tmp}/codex-shell-last.XXXXXX") || exit 1
+
+  command codex "${codex_args[@]}" --json -o "$last_message_file" - < "$prompt_file" >| "$json_file" 2>&1
+  codex_exit=$?
+
+  while IFS= read -r line; do
+    [[ "$line" == *"ERROR codex_core::session: failed to record rollout items:"* ]] && continue
+
+    if [[ "$line" != \{* ]]; then
+      print -u2 -- "$line"
+      continue
+    fi
+
+    event_type=$(jq -r '.type // empty' 2>/dev/null <<< "$line")
+    case "$event_type" in
+      item.completed)
+        item_type=$(jq -r '.item.type // empty' 2>/dev/null <<< "$line")
+        case "$item_type" in
+          command_execution)
+            had_command=1
+            command_text=$(jq -r '.item.command // empty' 2>/dev/null <<< "$line")
+            output_text=$(jq -r '.item.aggregated_output // empty' 2>/dev/null <<< "$line")
+            exit_code=$(jq -r '.item.exit_code // empty' 2>/dev/null <<< "$line")
+
+            if [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" && -n "$command_text" ]]; then
+              print -r -- "$ $command_text"
+            fi
+            [[ -n "$output_text" ]] && print -rn -- "$output_text"
+            if [[ -n "$exit_code" && "$exit_code" != "0" ]]; then
+              print -u2 -- "[codex-shell] command exited with $exit_code"
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  done < "$json_file"
+
+  if (( ! had_command )) && [[ -s "$last_message_file" ]]; then
+    print -r -- ''
+    cat -- "$last_message_file"
+  fi
+
+  exit "$codex_exit"
+else
+  command codex "${codex_args[@]}" - < "$prompt_file"
+fi

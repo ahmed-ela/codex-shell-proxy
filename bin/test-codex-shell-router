@@ -1,0 +1,96 @@
+#!/usr/bin/env zsh
+
+emulate -L zsh
+setopt local_options pipefail
+
+if [[ "${CODEX_SHELL_ROUTER_TEST_INSIDE:-0}" != "1" ]]; then
+  export CODEX_SHELL_ROUTER_TEST_SCRIPT="${0:A}"
+  TERM_PROGRAM= GHOSTTY_RESOURCES_DIR= exec zsh -lic 'CODEX_SHELL_ROUTER_TEST_INSIDE=1 source "$CODEX_SHELL_ROUTER_TEST_SCRIPT"'
+fi
+
+if (( ! $+functions[__codex_shell_line_is_direct_command] )); then
+  script_dir="${${(%):-%x}:A:h}"
+  repo_hook="${script_dir:h}/zsh/codex-shell.zsh"
+  if [[ -r "$repo_hook" ]]; then
+    source "$repo_hook"
+  fi
+fi
+
+if (( ! $+functions[__codex_shell_line_is_direct_command] )); then
+  print -u2 -- "test-codex-shell-router: __codex_shell_line_is_direct_command is not loaded"
+  exit 2
+fi
+
+typeset -a expected labels lines
+
+add_case() {
+  expected+=("$1")
+  labels+=("$2")
+  lines+=("$3")
+}
+
+add_case direct "empty line" ""
+add_case direct "blank line" "   "
+add_case direct "comment" "# local note"
+add_case direct "assignment only" "FOO=bar"
+add_case direct "simple executable" "ls"
+add_case direct "executable with args" "ls -la"
+add_case direct "builtin" "pwd"
+add_case direct "builtin with args" "cd /tmp"
+add_case direct "assignment plus executable" "NO_COLOR=1 ls"
+add_case direct "pipeline" "echo hello | wc -c"
+add_case direct "command chain" "printf ok && echo done"
+add_case direct "shell keyword" "if true; then echo yes; fi"
+add_case direct "zsh condition" "[[ -d ~/.dotfiles ]]"
+add_case direct "absolute executable path" "/bin/ls -d /tmp"
+
+if command -v jj >/dev/null 2>&1; then
+  add_case direct "jj alias/subcommand" "jj st"
+  add_case direct "env assignment plus jj" "NO_COLOR=1 jj st"
+fi
+
+if command -v git >/dev/null 2>&1 && command -v jj >/dev/null 2>&1; then
+  add_case direct "git/jj shell chain" "git status && jj st"
+fi
+
+if command -v open >/dev/null 2>&1; then
+  add_case direct "macOS open path" "open ."
+fi
+
+add_case proxy "natural request with command word" "run ls"
+add_case proxy "natural jj request" "show my jj changes"
+add_case proxy "review request" "review current changes"
+add_case proxy "slash command request" "/review on my current changes"
+add_case proxy "polite natural request" "please list files"
+add_case proxy "cwd question" "what folder am i in"
+add_case proxy "unknown path command" "/definitely/not/a/command"
+add_case proxy "repo task request" "create a bookmark for this change"
+add_case proxy "test task request" "run tests"
+add_case proxy "debugging question" "why did last command fail"
+
+integer passed=0 failed=0 i=1
+local actual line label want
+
+for (( i = 1; i <= ${#lines[@]}; i++ )); do
+  want="${expected[i]}"
+  label="${labels[i]}"
+  line="${lines[i]}"
+
+  if __codex_shell_line_is_direct_command "$line"; then
+    actual=direct
+  else
+    actual=proxy
+  fi
+
+  if [[ "$actual" == "$want" ]]; then
+    (( passed++ ))
+    printf 'ok %02d %-30s %s\n' "$i" "$label" "$want"
+  else
+    (( failed++ ))
+    printf 'not ok %02d %-30s expected=%s actual=%s line=%s\n' \
+      "$i" "$label" "$want" "$actual" "${(qqq)line}"
+  fi
+done
+
+printf '\n%s passed, %s failed\n' "$passed" "$failed"
+(( failed == 0 ))
