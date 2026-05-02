@@ -62,6 +62,27 @@ check_no_fast_path() {
   (( i++ ))
 }
 
+check_command_echo() {
+  local label="$1" input="$2" expected_status="$3" output rc
+  output="$(
+    CODEX_SHELL_TEST_FAST_PATH_ONLY=1 \
+    CODEX_SHELL_SHOW_COMMANDS=1 \
+    CODEX_SHELL_WARM=0 \
+    "$proxy" -- "$input" 2>&1
+  )"
+  rc=$?
+
+  if [[ "$rc" == 0 && "$output" == '$ '*$'\n'"$expected_status" ]]; then
+    (( passed++ ))
+    printf 'ok %02d %-34s %s\n' "$i" "$label" command-echo
+  else
+    (( failed++ ))
+    printf 'not ok %02d %-34s rc=%s expected_status=%s output=%s\n' \
+      "$i" "$label" "$rc" "${(qqq)expected_status}" "${(qqq)output}"
+  fi
+  (( i++ ))
+}
+
 chrome_status="$(app_status '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')"
 safari_status="$(app_status '/System/Applications/Safari.app/Contents/MacOS/Safari')"
 
@@ -71,6 +92,7 @@ check_output "google chrome open" "is google chrome open" "$chrome_status"
 check_output "chrome filler phrase" "can you check if google chrome is running right now" "$chrome_status"
 check_output "safari dynamic app" "is safari running" "$safari_status"
 check_output "unknown app process" "definitelynotanappforcodexshell process running?" "not_running"
+check_command_echo "status command echo" "is google chrome running" "$chrome_status"
 check_no_fast_path "chrome alone" "chrome"
 check_no_fast_path "non-status prompt" "open safari"
 

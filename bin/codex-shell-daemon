@@ -45,6 +45,7 @@ Behavior:
 - Only do what the user asked.
 - Do not inspect or print repo status unless it helps satisfy the user request.
 - Run straightforward shell/repo commands directly when useful.
+- Prefer commands whose output is readable directly in a terminal; use concise flags and filters when they answer the request.
 - Prefer jj/Jujutsu over git when the current directory is in a jj repo.
 - Avoid destructive actions unless the user explicitly asked for them.
 - If an action is ambiguous or risky, ask one short question instead of guessing.
@@ -535,7 +536,7 @@ class Daemon:
                         model=str(request["model"]),
                         effort=str(request["effort"]),
                         yolo=bool(request.get("yolo")),
-                        show_commands=bool(request.get("showCommands", False)),
+                        show_commands=bool(request.get("showCommands", True)),
                         emit=lambda stream, text: self.send_client(
                             file_obj, {"stream": stream, "text": text}
                         ),
@@ -697,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
     request_p.add_argument("--yolo", action="store_true")
     request_p.add_argument("--show-commands", dest="show_commands", action="store_true")
     request_p.add_argument("--hide-commands", dest="show_commands", action="store_false")
-    request_p.set_defaults(show_commands=False)
+    request_p.set_defaults(show_commands=True)
     request_p.add_argument("input", nargs=argparse.REMAINDER)
 
     args = parser.parse_args(argv)

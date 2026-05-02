@@ -44,6 +44,10 @@ __codex_shell_print_app_process_status() {
     [[ -n "$executable" ]] || executable="${app_path:t:r}"
     process_path="$app_path/Contents/MacOS/$executable"
 
+    if [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" ]]; then
+      print -r -- "$ ps -axo comm= | grep -F -- ${(q)process_path} >/dev/null"
+    fi
+
     if command ps -axo comm= 2>/dev/null | command grep -F -- "$process_path" >/dev/null 2>&1; then
       print -r -- 'running'
     else
@@ -51,6 +55,10 @@ __codex_shell_print_app_process_status() {
     fi
     __codex_shell_fast_path_exit=0
     return 0
+  fi
+
+  if [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" ]]; then
+    print -r -- "$ ps -axo comm= # match normalized process name ${(q)query_key}"
   fi
 
   while IFS= read -r comm; do
@@ -285,7 +293,7 @@ __codex_shell_run_fast_path() {
 
   [[ -n "${command_text:-}" ]] || return 1
 
-  if [[ "${CODEX_SHELL_SHOW_COMMANDS:-0}" == "1" ]]; then
+  if [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" ]]; then
     print -r -- "$ $command_text"
   fi
   eval "$command_text"
@@ -313,7 +321,8 @@ if [[ "${CODEX_SHELL_WARM:-1}" != "0" && "${CODEX_SHELL_SEARCH:-0}" != "1" ]] &&
   )
 
   [[ "${CODEX_SHELL_YOLO:-0}" == "1" ]] && daemon_args+=(--yolo)
-  [[ "${CODEX_SHELL_SHOW_COMMANDS:-0}" == "1" ]] && daemon_args+=(--show-commands)
+  [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" ]] && daemon_args+=(--show-commands)
+  [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" != "1" ]] && daemon_args+=(--hide-commands)
 
   codex-shell-daemon "${daemon_args[@]}" -- "$input"
   daemon_exit=$?
@@ -367,6 +376,7 @@ Behavior:
 - Only do what the user asked.
 - Do not inspect or print repo status unless it helps satisfy the user request.
 - Run straightforward shell/repo commands directly when useful.
+- Prefer commands whose output is readable directly in a terminal; use concise flags and filters when they answer the request.
 - Prefer jj/Jujutsu over git when the current directory is in a jj repo.
 - Avoid destructive actions unless the user explicitly asked for them.
 - If an action is ambiguous or risky, ask one short question instead of guessing.
@@ -433,7 +443,7 @@ if command -v jq >/dev/null 2>&1; then
             output_text=$(jq -r '.item.aggregated_output // empty' 2>/dev/null <<< "$line")
             exit_code=$(jq -r '.item.exit_code // empty' 2>/dev/null <<< "$line")
 
-            if [[ "${CODEX_SHELL_SHOW_COMMANDS:-0}" == "1" && -n "$command_text" ]]; then
+            if [[ "${CODEX_SHELL_SHOW_COMMANDS:-1}" == "1" && -n "$command_text" ]]; then
               print -r -- "$ $command_text"
             fi
             [[ -n "$output_text" ]] && print -rn -- "$output_text"

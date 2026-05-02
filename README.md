@@ -62,13 +62,13 @@ Choose the Codex model/reasoning pair.
 export CODEX_SHELL_SHOW_COMMANDS=0
 ```
 
-Show only command output. This is the default.
+Hide the `$ ...` command line and show only command output.
 
 ```sh
 export CODEX_SHELL_SHOW_COMMANDS=1
 ```
 
-Also print the `$ ...` command line Codex chose before the command output.
+Print the `$ ...` command line before command output. This is the default.
 
 ```sh
 export CODEX_SHELL_FAST_PATH=0
