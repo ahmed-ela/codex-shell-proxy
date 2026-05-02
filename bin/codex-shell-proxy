@@ -25,28 +25,183 @@ __codex_shell_normalize() {
 
 __codex_shell_print_app_process_status() {
   emulate -L zsh
-  setopt local_options pipefail
+  setopt local_options pipefail extended_glob
 
-  local app_key="$1"
-  local process_pattern=''
+  local query="$1"
+  local query_key app_path executable process_path comm comm_key
+  query_key="$(__codex_shell_app_key "$query")"
+  [[ -n "$query_key" ]] || return 1
 
-  case "$app_key" in
-    chrome|google\ chrome)
-      process_pattern='Google Chrome.app/Contents/MacOS/Google Chrome'
-      ;;
-    *)
+  case "$query_key" in
+    it|this|that|anything|something|process|app|application)
       return 1
       ;;
   esac
 
-  if command ps -axo comm= 2>/dev/null | command grep -F -- "$process_pattern" >/dev/null 2>&1; then
-    print -r -- 'running'
-  else
-    print -r -- 'not_running'
+  app_path="$(__codex_shell_resolve_app_bundle "$query_key")"
+  if [[ -n "$app_path" ]]; then
+    executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist" 2>/dev/null)"
+    [[ -n "$executable" ]] || executable="${app_path:t:r}"
+    process_path="$app_path/Contents/MacOS/$executable"
+
+    if command ps -axo comm= 2>/dev/null | command grep -F -- "$process_path" >/dev/null 2>&1; then
+      print -r -- 'running'
+    else
+      print -r -- 'not_running'
+    fi
+    __codex_shell_fast_path_exit=0
+    return 0
   fi
 
+  while IFS= read -r comm; do
+    comm_key="$(__codex_shell_app_key "${comm:t}")"
+    if [[ "$comm_key" == "$query_key" || "$comm_key" == *" $query_key" ]]; then
+      print -r -- 'running'
+      __codex_shell_fast_path_exit=0
+      return 0
+    fi
+  done < <(command ps -axo comm= 2>/dev/null)
+
+  print -r -- 'not_running'
   __codex_shell_fast_path_exit=0
   return 0
+}
+
+__codex_shell_app_key() {
+  emulate -L zsh
+  setopt local_options extended_glob
+
+  local text="${1:l}"
+  text="${text:r}"
+  text="${text//&/ and }"
+  text="${text//[-_.]/ }"
+  text="${text//[^[:alnum:][:space:]]/ }"
+  text="${(j: :)${(z)text}}"
+  text="${text#the }"
+  text="${text#app }"
+  text="${text% app}"
+  text="${text% application}"
+  print -r -- "$text"
+}
+
+__codex_shell_resolve_app_bundle() {
+  emulate -L zsh
+  setopt local_options extended_glob
+
+  local query_key="$1"
+  local -a app_dirs
+  local app_dir app_path app_name app_key suffix_path=''
+  integer suffix_matches=0
+
+  app_dirs=(
+    /Applications
+    "$HOME/Applications"
+    /Applications/Utilities
+    /System/Applications
+    /System/Applications/Utilities
+  )
+
+  for app_dir in "${app_dirs[@]}"; do
+    [[ -d "$app_dir" ]] || continue
+    for app_path in "$app_dir"/*.app(N); do
+      [[ "${app_path:t}" == .* ]] && continue
+      app_name="${app_path:t:r}"
+      app_key="$(__codex_shell_app_key "$app_name")"
+
+      if [[ "$app_key" == "$query_key" ]]; then
+        print -r -- "$app_path"
+        return 0
+      fi
+
+      if [[ "$app_key" == *" $query_key" ]]; then
+        suffix_path="$app_path"
+        (( suffix_matches++ ))
+      fi
+    done
+  done
+
+  if (( suffix_matches == 1 )); then
+    print -r -- "$suffix_path"
+    return 0
+  fi
+
+  return 1
+}
+
+__codex_shell_extract_process_status_query() {
+  emulate -L zsh
+
+  local text="$1" query=''
+  text="${text% right now}"
+  text="${text% rn}"
+  text="${text// currently / }"
+  text="${text// still / }"
+
+  case "$text" in
+    can\ you\ check\ if\ *\ is\ running)
+      query="${text#can you check if }"
+      query="${query% is running}"
+      ;;
+    can\ you\ check\ if\ *\ is\ open)
+      query="${text#can you check if }"
+      query="${query% is open}"
+      ;;
+    can\ you\ see\ if\ *\ is\ running)
+      query="${text#can you see if }"
+      query="${query% is running}"
+      ;;
+    can\ you\ see\ if\ *\ is\ open)
+      query="${text#can you see if }"
+      query="${query% is open}"
+      ;;
+    check\ if\ *\ is\ running|see\ if\ *\ is\ running)
+      query="${text#* if }"
+      query="${query% is running}"
+      ;;
+    check\ if\ *\ is\ open|see\ if\ *\ is\ open)
+      query="${text#* if }"
+      query="${query% is open}"
+      ;;
+    do\ i\ have\ *\ running)
+      query="${text#do i have }"
+      query="${query% running}"
+      ;;
+    is\ there\ a\ *\ process)
+      query="${text#is there a }"
+      query="${query% process}"
+      ;;
+    is\ the\ *\ process\ running)
+      query="${text#is the }"
+      query="${query% process running}"
+      ;;
+    is\ *\ process\ running)
+      query="${text#is }"
+      query="${query% process running}"
+      ;;
+    is\ *\ running)
+      query="${text#is }"
+      query="${query% running}"
+      ;;
+    is\ *\ open)
+      query="${text#is }"
+      query="${query% open}"
+      ;;
+    *\ process\ running)
+      query="${text% process running}"
+      ;;
+    *\ running)
+      query="${text% running}"
+      ;;
+    *\ open)
+      query="${text% open}"
+      ;;
+  esac
+
+  query="${query#the }"
+  query="${query#app }"
+  query="${query% app}"
+  query="${query% application}"
+  print -r -- "$query"
 }
 
 __codex_shell_run_process_status_fast_path() {
@@ -54,19 +209,12 @@ __codex_shell_run_process_status_fast_path() {
   setopt local_options extended_glob
 
   local normalized="$1"
+  local query="$(__codex_shell_extract_process_status_query "$normalized")"
 
-  case "$normalized" in
-    chrome|google\ chrome)
-      return 1
-      ;;
-    chrome\ process\ running|chrome\ running|chrome\ open|\
-    is\ chrome\ process\ running|is\ the\ chrome\ process\ running|is\ chrome\ running|is\ chrome\ open|\
-    google\ chrome\ process\ running|google\ chrome\ running|google\ chrome\ open|\
-    is\ google\ chrome\ process\ running|is\ the\ google\ chrome\ process\ running|is\ google\ chrome\ running|is\ google\ chrome\ open)
-      __codex_shell_print_app_process_status chrome
-      return $?
-      ;;
-  esac
+  [[ -n "$query" ]] || return 1
+  [[ "$query" != "$normalized" ]] || return 1
+  __codex_shell_print_app_process_status "$query"
+  return $?
 
   return 1
 }

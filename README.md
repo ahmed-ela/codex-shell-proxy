@@ -32,8 +32,9 @@ can you ls
 
 Obvious shell requests are handled by a local deterministic fast path. For
 example, `can you ls` maps directly to `ls` without starting Codex.
-Exact OS predicates also stay local. For example, `chrome process running?`
-prints only `running` or `not_running`.
+Exact OS predicates also stay local. For example, `is safari running` or
+`chrome process running?` resolves the app dynamically and prints only
+`running` or `not_running`.
 
 For requests that need Codex, the proxy uses a warm daemon by default. The
 natural-language line stays visible, then the shell prints:

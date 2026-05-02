@@ -11,9 +11,10 @@ if [[ ! -x "$proxy" ]]; then
   exit 2
 fi
 
-expected_chrome_status() {
+app_status() {
   emulate -L zsh
-  if command ps -axo comm= 2>/dev/null | command grep -F -- 'Google Chrome.app/Contents/MacOS/Google Chrome' >/dev/null 2>&1; then
+  local process_path="$1"
+  if command ps -axo comm= 2>/dev/null | command grep -F -- "$process_path" >/dev/null 2>&1; then
     print -r -- 'running'
   else
     print -r -- 'not_running'
@@ -61,13 +62,17 @@ check_no_fast_path() {
   (( i++ ))
 }
 
-chrome_status="$(expected_chrome_status)"
+chrome_status="$(app_status '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')"
+safari_status="$(app_status '/System/Applications/Safari.app/Contents/MacOS/Safari')"
 
 check_output "chrome process question" "chrome process running?" "$chrome_status"
 check_output "is chrome running" "is chrome running" "$chrome_status"
 check_output "google chrome open" "is google chrome open" "$chrome_status"
+check_output "chrome filler phrase" "can you check if google chrome is running right now" "$chrome_status"
+check_output "safari dynamic app" "is safari running" "$safari_status"
+check_output "unknown app process" "definitelynotanappforcodexshell process running?" "not_running"
 check_no_fast_path "chrome alone" "chrome"
-check_no_fast_path "unknown app process" "figma process running?"
+check_no_fast_path "non-status prompt" "open safari"
 
 printf '\n%s passed, %s failed\n' "$passed" "$failed"
 (( failed == 0 ))
