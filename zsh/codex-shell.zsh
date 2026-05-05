@@ -8,6 +8,8 @@ if [[ -o interactive ]]; then
 
   typeset -gA __codex_shell_jj_alias_targets
   typeset -gi __codex_shell_jj_alias_targets_loaded=0
+  typeset -g __codex_shell_jj_root_check_pwd=''
+  typeset -gi __codex_shell_jj_root_active=0
 
   __codex_shell_load_jj_alias_targets() {
     emulate -L zsh
@@ -57,7 +59,13 @@ if [[ -o interactive ]]; then
     local cmd="$1"
     [[ -n "$cmd" ]] || return 1
 
-    if command -v jj >/dev/null 2>&1 && jj root --ignore-working-copy >/dev/null 2>&1; then
+    if [[ "$__codex_shell_jj_root_check_pwd" != "$PWD" ]]; then
+      __codex_shell_jj_root_check_pwd="$PWD"
+      __codex_shell_jj_root_active=0
+      command -v jj >/dev/null 2>&1 && jj root --ignore-working-copy >/dev/null 2>&1 && __codex_shell_jj_root_active=1
+    fi
+
+    if (( __codex_shell_jj_root_active )); then
       __codex_shell_load_jj_alias_targets >/dev/null 2>&1 || true
       if [[ -n "${__codex_shell_jj_alias_targets[$cmd]-}" ]]; then
         print -r -- "jj ${__codex_shell_jj_alias_targets[$cmd]}"
@@ -110,8 +118,6 @@ if [[ -o interactive ]]; then
     [[ "$line" == *$'\n'* ]] && return 0
     [[ "$line" == [[:space:]]#\#* ]] && return 0
 
-    command zsh -n -c "$line" >/dev/null 2>&1 || return 1
-
     local -a words
     words=("${(@z)line}") || return 1
 
@@ -161,6 +167,10 @@ if [[ -o interactive ]]; then
           ;;
       esac
     done
+
+    if [[ "$line" == *[./~=\|';'\"\`\$\<\>\&\(\)\[\]\{\}]* ]]; then
+      return 0
+    fi
 
     return 1
   }
