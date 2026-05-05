@@ -1,8 +1,8 @@
 # codex-shell-proxy
 
-Natural-language Enter proxy for zsh using Codex.
+Explicit `showme` command for fast terminal requests through Codex.
 
-Valid shell commands still run normally. Lines that are not recognized as direct shell commands are sent to Codex/Spark as terminal requests.
+Normal shell commands run through zsh directly. Use `showme` when you want the terminal assistant.
 
 ## Install
 
@@ -18,7 +18,7 @@ source ~/.zshrc
 
 ## Try It
 
-Direct shell command:
+Direct shell command, with no router involved:
 
 ```sh
 ls
@@ -26,8 +26,8 @@ ls
 
 Natural-language request:
 
-```text
-can you ls
+```sh
+showme can you ls
 ```
 
 Obvious shell requests are handled by a local deterministic fast path. For
@@ -36,8 +36,8 @@ Exact OS predicates also stay local. For example, `is safari running` or
 `chrome process running?` resolves the app dynamically and prints only
 `running` or `not_running`.
 
-For requests that need Codex, the proxy uses a warm daemon by default. The
-natural-language line stays visible, then the shell prints:
+For requests that need Codex, `showme` uses a warm daemon by default. The shell
+prints:
 
 ```text
 gpt-5.3-codex-spark is thinking....
@@ -49,7 +49,14 @@ gpt-5.3-codex-spark is thinking....
 export CODEX_SHELL_ENTER=0
 ```
 
-Disable Enter interception for the current shell.
+Keep Enter interception disabled. This is the default.
+
+```sh
+export CODEX_SHELL_ENTER=1
+```
+
+Opt in to Enter interception for the current shell. Valid shell commands still
+run normally; lines not recognized as commands are sent to Codex.
 
 ```sh
 export CODEX_SHELL_MODEL=gpt-5.3-codex-spark
@@ -94,6 +101,13 @@ export CODEX_SHELL_AUTOSTART=0
 ```
 
 Do not start the warm daemon automatically when a new interactive shell opens.
+This is the default; `showme` starts or contacts the daemon on demand.
+
+```sh
+export CODEX_SHELL_AUTOSTART=1
+```
+
+Start the warm daemon automatically when a new interactive shell opens.
 
 ```sh
 export CODEX_SHELL_YOLO=1

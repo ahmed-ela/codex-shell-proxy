@@ -1,0 +1,45 @@
+#!/usr/bin/env zsh
+
+emulate -L zsh
+setopt local_options pipefail
+
+usage() {
+  print -u2 -- "usage: showme <request>"
+  print -u2 -- "       showme -- <request>"
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+request="$*"
+if [[ -z "${request//[[:space:]]/}" ]]; then
+  if [[ -t 0 ]]; then
+    usage
+    exit 2
+  fi
+  request="$(cat)"
+fi
+
+if [[ -z "${request//[[:space:]]/}" ]]; then
+  usage
+  exit 2
+fi
+
+script_dir="${0:A:h}"
+proxy="$script_dir/codex-shell-proxy"
+if [[ ! -x "$proxy" ]]; then
+  proxy="$(command -v codex-shell-proxy 2>/dev/null)"
+fi
+
+if [[ -z "$proxy" || ! -x "$proxy" ]]; then
+  print -u2 -- "showme: codex-shell-proxy not found"
+  exit 127
+fi
+
+exec "$proxy" -- "$request"

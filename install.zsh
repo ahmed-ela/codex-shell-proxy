@@ -12,6 +12,7 @@ mkdir -p -- "$bin_dir" "$zsh_dir"
 
 ln -sf -- "$repo_dir/bin/codex-shell-proxy" "$bin_dir/codex-shell-proxy"
 ln -sf -- "$repo_dir/bin/codex-shell-daemon" "$bin_dir/codex-shell-daemon"
+ln -sf -- "$repo_dir/bin/showme" "$bin_dir/showme"
 ln -sf -- "$repo_dir/bin/test-codex-shell-fast-path" "$bin_dir/test-codex-shell-fast-path"
 ln -sf -- "$repo_dir/bin/test-codex-shell-router" "$bin_dir/test-codex-shell-router"
 ln -sf -- "$repo_dir/zsh/codex-shell.zsh" "$zsh_dir/codex-shell.zsh"
@@ -21,7 +22,7 @@ source_line='[[ -r "$HOME/.config/codex-shell-proxy/codex-shell.zsh" ]] && sourc
 touch -- "$zshrc"
 if ! grep -Fqx -- "$source_line" "$zshrc"; then
   {
-    printf '\n# codex-shell-proxy natural-language Enter hook\n'
+    printf '\n# codex-shell-proxy optional shell helpers\n'
     printf '%s\n' "$source_line"
   } >> "$zshrc"
 fi

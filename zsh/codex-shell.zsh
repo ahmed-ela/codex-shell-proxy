@@ -1,8 +1,8 @@
-# Natural-language Enter proxy for zsh. Valid shell commands still execute
-# normally; otherwise the line is sent to Codex as a terminal request.
+# Optional natural-language Enter proxy for zsh. The default interface is the
+# explicit `showme` command so normal Enter has no router overhead.
 
 if [[ -o interactive ]]; then
-  if [[ "${CODEX_SHELL_WARM:-1}" != "0" && "${CODEX_SHELL_AUTOSTART:-1}" != "0" ]] && command -v codex-shell-daemon >/dev/null 2>&1; then
+  if [[ "${CODEX_SHELL_WARM:-1}" != "0" && "${CODEX_SHELL_AUTOSTART:-0}" == "1" ]] && command -v codex-shell-daemon >/dev/null 2>&1; then
     codex-shell-daemon start --quiet >/dev/null 2>&1 &!
   fi
 
@@ -178,7 +178,7 @@ if [[ -o interactive ]]; then
   __codex_shell_should_proxy_line() {
     emulate -L zsh
 
-    [[ "${CODEX_SHELL_ENTER:-1}" == "0" ]] && return 1
+    [[ "${CODEX_SHELL_ENTER:-0}" == "1" ]] || return 1
     command -v codex-shell-proxy >/dev/null 2>&1 || return 1
     __codex_shell_line_is_direct_command "$*" && return 1
     return 0
@@ -205,5 +205,9 @@ if [[ -o interactive ]]; then
     zle .accept-line
   }
 
-  zle -N accept-line __codex_shell_accept_line
+  if [[ "${CODEX_SHELL_ENTER:-0}" == "1" ]]; then
+    zle -N accept-line __codex_shell_accept_line
+  else
+    zle -A .accept-line accept-line 2>/dev/null || true
+  fi
 fi
