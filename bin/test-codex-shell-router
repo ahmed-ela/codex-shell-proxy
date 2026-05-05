@@ -47,6 +47,11 @@ add_case direct "absolute executable path" "/bin/ls -d /tmp"
 if command -v jj >/dev/null 2>&1; then
   add_case direct "jj alias/subcommand" "jj st"
   add_case direct "env assignment plus jj" "NO_COLOR=1 jj st"
+  if jj root --ignore-working-copy >/dev/null 2>&1; then
+    add_case direct "jj bare default alias" "desc"
+    add_case direct "jj bare alias with args" "desc -m 'swift shell + monorepo'"
+    add_case direct "jj status bare alias" "st"
+  fi
 fi
 
 if command -v git >/dev/null 2>&1 && command -v jj >/dev/null 2>&1; then
@@ -64,6 +69,7 @@ add_case proxy "slash command request" "/review on my current changes"
 add_case proxy "polite natural request" "please list files"
 add_case proxy "cwd question" "what folder am i in"
 add_case proxy "unknown path command" "/definitely/not/a/command"
+add_case direct "unknown cli-shaped command" "missing-tool --help"
 add_case proxy "repo task request" "create a bookmark for this change"
 add_case proxy "test task request" "run tests"
 add_case proxy "debugging question" "why did last command fail"
